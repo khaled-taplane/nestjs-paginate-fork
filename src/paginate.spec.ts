@@ -1108,6 +1108,129 @@ describe('paginate', () => {
         })
     })
 
+    describe('wildcard searchable columns (*)', () => {
+        it('should search every relation column matched by a wildcard without searchBy', async () => {
+            const config: PaginateConfig<CatEntity> = {
+                sortableColumns: ['id'],
+                searchableColumns: ['home.*'],
+                relations: { home: true },
+            }
+            const query: PaginateQuery = {
+                path: '',
+                search: 'Mansion',
+            }
+
+            const result = await paginate<CatEntity>(query, catRepo, config)
+
+            expect(result.data.map((cat) => cat.name)).toStrictEqual(['Shadow'])
+            expect(result.meta.searchBy).toContain('home.name')
+            expect(result.meta.searchBy).not.toContain('home.*')
+        })
+
+        it('should search every embedded column matched by a wildcard without searchBy', async () => {
+            const config: PaginateConfig<CatEntity> = {
+                sortableColumns: ['id'],
+                searchableColumns: ['size.*'],
+            }
+            const query: PaginateQuery = {
+                path: '',
+                search: '35',
+            }
+
+            const result = await paginate<CatEntity>(query, catRepo, config)
+
+            expect(result.data.map((cat) => cat.name)).toStrictEqual(['George'])
+            expect(result.meta.searchBy).toEqual(expect.arrayContaining(['size.height', 'size.width', 'size.length']))
+        })
+
+        it('should search the complete JSON value matched by a wildcard without searchBy', async () => {
+            const config: PaginateConfig<CatHomeEntity> = {
+                sortableColumns: ['id'],
+                searchableColumns: ['config.*'],
+            }
+            const query: PaginateQuery = {
+                path: '',
+                search: 'vip',
+            }
+
+            const result = await paginate<CatHomeEntity>(query, catHomeRepo, config)
+
+            expect(result.data.map((home) => home.name)).toStrictEqual(['Mansion'])
+            expect(result.meta.searchBy).toStrictEqual(['config'])
+        })
+
+        it('should allow searchBy to select a concrete JSON path matched by a wildcard', async () => {
+            const config: PaginateConfig<CatHomeEntity> = {
+                sortableColumns: ['id'],
+                searchableColumns: ['config.*'],
+            }
+            const query: PaginateQuery = {
+                path: '',
+                search: 'dark',
+                searchBy: ['config.theme'],
+            }
+
+            const result = await paginate<CatHomeEntity>(query, catHomeRepo, config)
+
+            expect(result.data.map((home) => home.name)).toStrictEqual(['Box', 'Mansion'])
+            expect(result.meta.searchBy).toStrictEqual(['config.theme'])
+        })
+
+        it('should ignore a nonexistent column matched by a wildcard', async () => {
+            const config: PaginateConfig<CatEntity> = {
+                sortableColumns: ['id'],
+                searchableColumns: ['home.*'],
+                relations: { home: true },
+            }
+            const query: PaginateQuery = {
+                path: '',
+                search: 'Milo',
+                searchBy: ['home.doesNotExist'],
+            }
+
+            const result = await paginate<CatEntity>(query, catRepo, config)
+
+            expect(result.data).toHaveLength(cats.length)
+            expect(result.meta.searchBy).toStrictEqual([])
+        })
+
+        it('should reject unsafe dynamic JSON paths matched by a wildcard', async () => {
+            const config: PaginateConfig<CatHomeEntity> = {
+                sortableColumns: ['id'],
+                searchableColumns: ['config.*'],
+            }
+            const query: PaginateQuery = {
+                path: '',
+                search: 'dark',
+                searchBy: ["config.theme') OR 1=1 --"],
+            }
+
+            const result = await paginate<CatHomeEntity>(query, catHomeRepo, config)
+
+            expect(result.data).toHaveLength(catHomes.length)
+            expect(result.meta.searchBy).toStrictEqual([])
+        })
+
+        it('should combine exact and expanded searchable columns by default', async () => {
+            const config: PaginateConfig<CatEntity> = {
+                sortableColumns: ['id'],
+                searchableColumns: ['name', 'home.*'],
+                relations: { home: true },
+            }
+            const query: PaginateQuery = {
+                path: '',
+                search: 'Milo',
+            }
+
+            const result = await paginate<CatEntity>(query, catRepo, config)
+
+            expect(result.data.map((cat) => cat.name)).toStrictEqual(['Milo'])
+            expect(result.meta.searchBy).toContain('name')
+            expect(result.meta.searchBy).toContain('home.name')
+            expect(result.meta.searchBy).not.toContain('home.*')
+        })
+    })
+
     it('should return result based on search term', async () => {
         const config: PaginateConfig<CatEntity> = {
             sortableColumns: ['id', 'name', 'color'],

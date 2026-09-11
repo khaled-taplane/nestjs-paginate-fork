@@ -40,6 +40,7 @@ import {
     isNotNil,
     isRepository,
     JoinMethod,
+    JSON_COLUMN_TYPES,
     MappedColumns,
     mergeRelationSchema,
     Order,
@@ -56,6 +57,9 @@ const logger: Logger = new Logger('nestjs-paginate')
 export { AddFilterOptions, FilterOperator, FilterSuffix }
 export { buildOptimizedCountQuery }
 
+// eslint-disable-next-line @typescript-eslint/ban-types
+export type SearchableColumn<T> = Column<T> | (string & {})
+
 export class Paginated<T> {
     data: T[]
     meta: {
@@ -64,7 +68,7 @@ export class Paginated<T> {
         currentPage?: number
         totalPages?: number
         sortBy: SortBy<T>
-        searchBy: Column<T>[]
+        searchBy: SearchableColumn<T>[]
         search: string
         select: string[]
         filter?: {
@@ -94,7 +98,7 @@ export interface PaginateConfig<T> {
     // eslint-disable-next-line @typescript-eslint/ban-types
     sortableColumns: (Column<T> | (string & {}))[]
     nullSort?: 'first' | 'last'
-    searchableColumns?: Column<T>[]
+    searchableColumns?: SearchableColumn<T>[]
     // eslint-disable-next-line @typescript-eslint/ban-types
     select?: (Column<T> | (string & {}))[]
     maxLimit?: number
@@ -306,6 +310,131 @@ function isSortableColumn<T>(
     }
 
     return isWildcardSortableColumn(column, sortableColumns, queryBuilder)
+}
+
+function isValidSearchableColumn<T>(column: string, queryBuilder: SelectQueryBuilder<T>): boolean {
+    const property = getPropertiesByColumnName(column)
+    const columnParts = column.replace(/[()]/g, '').split('.')
+
+    if (!/^[a-zA-Z0-9_.]+$/.test(property.column)) {
+        return false
+    }
+
+    const jsonbResolution = resolveJsonbPath(queryBuilder, column)
+
+    if (jsonbResolution.isJsonb) {
+        return jsonbResolution.jsonPath.length > 0
+    }
+
+    let metadata = queryBuilder.expressionMap.mainAlias.metadata
+
+    for (let index = 0; index < columnParts.length; index++) {
+        const propertyPath = columnParts.slice(index).join('.')
+
+        if (metadata.findColumnWithPropertyPath(propertyPath)) {
+            return true
+        }
+
+        const relationMetadata = metadata.findRelationWithPropertyPath(columnParts[index])
+
+        if (!relationMetadata) {
+            return false
+        }
+
+        metadata = relationMetadata.inverseEntityMetadata
+    }
+
+    return false
+}
+
+function expandSearchableColumnWildcard<T>(
+    pattern: string,
+    queryBuilder: SelectQueryBuilder<T>
+): SearchableColumn<T>[] {
+    const wildcardPath = pattern.slice(0, -2)
+    const jsonbResolution = resolveJsonbPath(queryBuilder, wildcardPath)
+
+    if (jsonbResolution.isJsonb) {
+        return [wildcardPath]
+    }
+
+    const pathParts = wildcardPath.split('.')
+    const relationPath: string[] = []
+    let metadata = queryBuilder.expressionMap.mainAlias.metadata
+    let pathIndex = 0
+
+    while (pathIndex < pathParts.length) {
+        const relation = metadata.findRelationWithPropertyPath(pathParts[pathIndex])
+
+        if (!relation) {
+            break
+        }
+
+        relationPath.push(pathParts[pathIndex])
+        metadata = relation.inverseEntityMetadata
+        pathIndex++
+    }
+
+    const localPath = pathParts.slice(pathIndex).join('.')
+
+    if (localPath) {
+        const column = metadata.findColumnWithPropertyPath(localPath)
+
+        if (column && JSON_COLUMN_TYPES.includes(column.type as string)) {
+            return [wildcardPath]
+        }
+
+        if (!metadata.embeddeds.some((embedded) => embedded.propertyPath === localPath)) {
+            return []
+        }
+    }
+
+    const relationPrefix = relationPath.join('.')
+    const embeddedPrefix = localPath ? `${localPath}.` : ''
+
+    return metadata.columns
+        .filter(
+            (column) =>
+                !column.isVirtualProperty &&
+                !column.relationMetadata &&
+                (!embeddedPrefix || column.propertyPath.startsWith(embeddedPrefix))
+        )
+        .map((column) => {
+            if (!relationPrefix) {
+                return column.propertyPath
+            }
+
+            const propertyPath = column.embeddedMetadata ? `(${column.propertyPath})` : column.propertyPath
+            return `${relationPrefix}.${propertyPath}`
+        })
+}
+
+function resolveSearchableColumnWildcards<T>(
+    query: PaginateQuery,
+    config: PaginateConfig<T>,
+    queryBuilder: SelectQueryBuilder<T>
+): PaginateConfig<T> {
+    const searchableColumns = config.searchableColumns
+
+    if (!searchableColumns?.some((column) => String(column).endsWith('.*'))) {
+        return config
+    }
+
+    const exactColumns = searchableColumns.filter((column) => !String(column).endsWith('.*'))
+    const wildcardPatterns = searchableColumns.filter((column) => String(column).endsWith('.*'))
+    const resolvedWildcardColumns =
+        query.searchBy && !config.ignoreSearchByInQueryParam
+            ? query.searchBy.filter(
+                  (column) =>
+                      wildcardPatterns.some((pattern) => isWildcardColumn(column, String(pattern))) &&
+                      isValidSearchableColumn(column, queryBuilder)
+              )
+            : wildcardPatterns.flatMap((pattern) => expandSearchableColumnWildcard(String(pattern), queryBuilder))
+
+    return {
+        ...config,
+        searchableColumns: [...new Set([...exactColumns, ...resolvedWildcardColumns])],
+    }
 }
 
 export async function paginate<T extends ObjectLiteral>(
@@ -583,7 +712,7 @@ export async function paginate<T extends ObjectLiteral>(
         logAndThrowException('Polymorphic sort groups (using "~") are not supported with cursor pagination.')
     }
 
-    const searchBy: Column<T>[] = []
+    const searchBy: SearchableColumn<T>[] = []
 
     let [items, totalItems]: [T[], number] = [[], 0]
 
@@ -1100,6 +1229,8 @@ export async function paginate<T extends ObjectLiteral>(
         const baseWhereStr = generateWhereStatement(queryBuilder, config.where)
         queryBuilder.andWhere(`(${baseWhereStr})`)
     }
+
+    config = resolveSearchableColumnWildcards(query, config, queryBuilder)
 
     if (config.searchableColumns) {
         if (query.searchBy && !config.ignoreSearchByInQueryParam) {
