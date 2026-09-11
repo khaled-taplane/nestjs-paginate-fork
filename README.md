@@ -271,9 +271,9 @@ const paginateConfig: PaginateConfig<CatEntity> {
    * param. Limit search scope further by using `searchBy` query param.
    *
    * Wildcard support:
-   * - Use a trailing `.*` to allow a concrete descendant path in `searchBy`.
-   * - Wildcards match one or more descendant segments and are validated against
-   *   entity metadata or a JSON path before use.
+   * - Use a trailing `.*` to search every descendant without requiring `searchBy`.
+   * - Relation and embedded wildcards expand to concrete columns.
+   * - JSON wildcards search the complete JSON value as text.
    */
   searchableColumns: ['name', 'color'],
 
@@ -715,8 +715,8 @@ Exact sortable column entries take precedence over wildcard entries.
 
 ## Wildcard searchable columns
 
-You can use a trailing `.*` in `searchableColumns` to allow clients to search a
-concrete descendant path without explicitly listing every possible path.
+You can use a trailing `.*` in `searchableColumns` to include every descendant
+in the default global search. A `searchBy` query parameter is not required.
 
 ```typescript
 const config: PaginateConfig<CatEntity> = {
@@ -726,17 +726,17 @@ const config: PaginateConfig<CatEntity> = {
 }
 ```
 
-For example, this configuration allows:
+For example, this configuration searches values nested anywhere inside
+`home.config` with a normal search request:
 
 ```
-http://localhost:3000/cats?search=dark&searchBy=home.config.theme
+http://localhost:3000/cats?search=dark
 ```
 
-The wildcard must be the final path segment and matches one or more descendant
-segments. The requested path must resolve to an entity column, embedded column,
-relation column, or JSON path. Wildcards authorize paths supplied through
-`searchBy`; when `searchBy` is omitted (or ignored), only exact entries such as
-`name` are searched because dynamic JSON keys cannot be enumerated safely.
+The wildcard must be the final path segment. Relation and embedded wildcards
+expand to their concrete scalar columns. JSON/JSONB wildcards search the complete
+JSON value as text, allowing values under dynamic keys to match. Clients may still
+use `searchBy=home.config.theme` to restrict a search to one concrete path.
 
 ## Filters
 

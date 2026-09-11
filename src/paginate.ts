@@ -40,6 +40,7 @@ import {
     isNotNil,
     isRepository,
     JoinMethod,
+    JSON_COLUMN_TYPES,
     MappedColumns,
     mergeRelationSchema,
     Order,
@@ -312,9 +313,10 @@ function isSortableColumn<T>(
 }
 
 function isValidSearchableColumn<T>(column: string, queryBuilder: SelectQueryBuilder<T>): boolean {
+    const property = getPropertiesByColumnName(column)
     const columnParts = column.replace(/[()]/g, '').split('.')
 
-    if (columnParts.some((part) => !/^[a-zA-Z0-9_$-]+$/.test(part))) {
+    if (!/^[a-zA-Z0-9_.]+$/.test(property.column)) {
         return false
     }
 
@@ -345,6 +347,68 @@ function isValidSearchableColumn<T>(column: string, queryBuilder: SelectQueryBui
     return false
 }
 
+function expandSearchableColumnWildcard<T>(
+    pattern: string,
+    queryBuilder: SelectQueryBuilder<T>
+): SearchableColumn<T>[] {
+    const wildcardPath = pattern.slice(0, -2)
+    const jsonbResolution = resolveJsonbPath(queryBuilder, wildcardPath)
+
+    if (jsonbResolution.isJsonb) {
+        return [wildcardPath]
+    }
+
+    const pathParts = wildcardPath.split('.')
+    const relationPath: string[] = []
+    let metadata = queryBuilder.expressionMap.mainAlias.metadata
+    let pathIndex = 0
+
+    while (pathIndex < pathParts.length) {
+        const relation = metadata.findRelationWithPropertyPath(pathParts[pathIndex])
+
+        if (!relation) {
+            break
+        }
+
+        relationPath.push(pathParts[pathIndex])
+        metadata = relation.inverseEntityMetadata
+        pathIndex++
+    }
+
+    const localPath = pathParts.slice(pathIndex).join('.')
+
+    if (localPath) {
+        const column = metadata.findColumnWithPropertyPath(localPath)
+
+        if (column && JSON_COLUMN_TYPES.includes(column.type as string)) {
+            return [wildcardPath]
+        }
+
+        if (!metadata.embeddeds.some((embedded) => embedded.propertyPath === localPath)) {
+            return []
+        }
+    }
+
+    const relationPrefix = relationPath.join('.')
+    const embeddedPrefix = localPath ? `${localPath}.` : ''
+
+    return metadata.columns
+        .filter(
+            (column) =>
+                !column.isVirtualProperty &&
+                !column.relationMetadata &&
+                (!embeddedPrefix || column.propertyPath.startsWith(embeddedPrefix))
+        )
+        .map((column) => {
+            if (!relationPrefix) {
+                return column.propertyPath
+            }
+
+            const propertyPath = column.embeddedMetadata ? `(${column.propertyPath})` : column.propertyPath
+            return `${relationPrefix}.${propertyPath}`
+        })
+}
+
 function resolveSearchableColumnWildcards<T>(
     query: PaginateQuery,
     config: PaginateConfig<T>,
@@ -357,18 +421,19 @@ function resolveSearchableColumnWildcards<T>(
     }
 
     const exactColumns = searchableColumns.filter((column) => !String(column).endsWith('.*'))
-    const requestedWildcardColumns =
+    const wildcardPatterns = searchableColumns.filter((column) => String(column).endsWith('.*'))
+    const resolvedWildcardColumns =
         query.searchBy && !config.ignoreSearchByInQueryParam
             ? query.searchBy.filter(
                   (column) =>
-                      searchableColumns.some((pattern) => isWildcardColumn(column, String(pattern))) &&
+                      wildcardPatterns.some((pattern) => isWildcardColumn(column, String(pattern))) &&
                       isValidSearchableColumn(column, queryBuilder)
               )
-            : []
+            : wildcardPatterns.flatMap((pattern) => expandSearchableColumnWildcard(String(pattern), queryBuilder))
 
     return {
         ...config,
-        searchableColumns: [...new Set([...exactColumns, ...requestedWildcardColumns])],
+        searchableColumns: [...new Set([...exactColumns, ...resolvedWildcardColumns])],
     }
 }
 
