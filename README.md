@@ -269,6 +269,11 @@ const paginateConfig: PaginateConfig<CatEntity> {
    * Type: (keyof CatEntity)[]
    * Description: These columns will be searched through when using the search query
    * param. Limit search scope further by using `searchBy` query param.
+   *
+   * Wildcard support:
+   * - Use a trailing `.*` to allow a concrete descendant path in `searchBy`.
+   * - Wildcards match one or more descendant segments and are validated against
+   *   entity metadata or a JSON path before use.
    */
   searchableColumns: ['name', 'color'],
 
@@ -707,6 +712,31 @@ http://localhost:3000/home?sortBy=home.config.metadata.status:DESC
 The wildcard must be the final path segment. It matches one or more descendant segments, so home.config.metadata.\* matches home.config.metadata.price, but does not match home.config.metadata itself.
 
 Exact sortable column entries take precedence over wildcard entries.
+
+## Wildcard searchable columns
+
+You can use a trailing `.*` in `searchableColumns` to allow clients to search a
+concrete descendant path without explicitly listing every possible path.
+
+```typescript
+const config: PaginateConfig<CatEntity> = {
+  sortableColumns: ['id'],
+  searchableColumns: ['name', 'home.config.*'],
+  relations: { home: true },
+}
+```
+
+For example, this configuration allows:
+
+```
+http://localhost:3000/cats?search=dark&searchBy=home.config.theme
+```
+
+The wildcard must be the final path segment and matches one or more descendant
+segments. The requested path must resolve to an entity column, embedded column,
+relation column, or JSON path. Wildcards authorize paths supplied through
+`searchBy`; when `searchBy` is omitted (or ignored), only exact entries such as
+`name` are searched because dynamic JSON keys cannot be enumerated safely.
 
 ## Filters
 

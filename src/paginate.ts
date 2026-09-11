@@ -56,6 +56,9 @@ const logger: Logger = new Logger('nestjs-paginate')
 export { AddFilterOptions, FilterOperator, FilterSuffix }
 export { buildOptimizedCountQuery }
 
+// eslint-disable-next-line @typescript-eslint/ban-types
+export type SearchableColumn<T> = Column<T> | (string & {})
+
 export class Paginated<T> {
     data: T[]
     meta: {
@@ -64,7 +67,7 @@ export class Paginated<T> {
         currentPage?: number
         totalPages?: number
         sortBy: SortBy<T>
-        searchBy: Column<T>[]
+        searchBy: SearchableColumn<T>[]
         search: string
         select: string[]
         filter?: {
@@ -94,7 +97,7 @@ export interface PaginateConfig<T> {
     // eslint-disable-next-line @typescript-eslint/ban-types
     sortableColumns: (Column<T> | (string & {}))[]
     nullSort?: 'first' | 'last'
-    searchableColumns?: Column<T>[]
+    searchableColumns?: SearchableColumn<T>[]
     // eslint-disable-next-line @typescript-eslint/ban-types
     select?: (Column<T> | (string & {}))[]
     maxLimit?: number
@@ -306,6 +309,67 @@ function isSortableColumn<T>(
     }
 
     return isWildcardSortableColumn(column, sortableColumns, queryBuilder)
+}
+
+function isValidSearchableColumn<T>(column: string, queryBuilder: SelectQueryBuilder<T>): boolean {
+    const columnParts = column.replace(/[()]/g, '').split('.')
+
+    if (columnParts.some((part) => !/^[a-zA-Z0-9_$-]+$/.test(part))) {
+        return false
+    }
+
+    const jsonbResolution = resolveJsonbPath(queryBuilder, column)
+
+    if (jsonbResolution.isJsonb) {
+        return jsonbResolution.jsonPath.length > 0
+    }
+
+    let metadata = queryBuilder.expressionMap.mainAlias.metadata
+
+    for (let index = 0; index < columnParts.length; index++) {
+        const propertyPath = columnParts.slice(index).join('.')
+
+        if (metadata.findColumnWithPropertyPath(propertyPath)) {
+            return true
+        }
+
+        const relationMetadata = metadata.findRelationWithPropertyPath(columnParts[index])
+
+        if (!relationMetadata) {
+            return false
+        }
+
+        metadata = relationMetadata.inverseEntityMetadata
+    }
+
+    return false
+}
+
+function resolveSearchableColumnWildcards<T>(
+    query: PaginateQuery,
+    config: PaginateConfig<T>,
+    queryBuilder: SelectQueryBuilder<T>
+): PaginateConfig<T> {
+    const searchableColumns = config.searchableColumns
+
+    if (!searchableColumns?.some((column) => String(column).endsWith('.*'))) {
+        return config
+    }
+
+    const exactColumns = searchableColumns.filter((column) => !String(column).endsWith('.*'))
+    const requestedWildcardColumns =
+        query.searchBy && !config.ignoreSearchByInQueryParam
+            ? query.searchBy.filter(
+                  (column) =>
+                      searchableColumns.some((pattern) => isWildcardColumn(column, String(pattern))) &&
+                      isValidSearchableColumn(column, queryBuilder)
+              )
+            : []
+
+    return {
+        ...config,
+        searchableColumns: [...new Set([...exactColumns, ...requestedWildcardColumns])],
+    }
 }
 
 export async function paginate<T extends ObjectLiteral>(
@@ -583,7 +647,7 @@ export async function paginate<T extends ObjectLiteral>(
         logAndThrowException('Polymorphic sort groups (using "~") are not supported with cursor pagination.')
     }
 
-    const searchBy: Column<T>[] = []
+    const searchBy: SearchableColumn<T>[] = []
 
     let [items, totalItems]: [T[], number] = [[], 0]
 
@@ -1100,6 +1164,8 @@ export async function paginate<T extends ObjectLiteral>(
         const baseWhereStr = generateWhereStatement(queryBuilder, config.where)
         queryBuilder.andWhere(`(${baseWhereStr})`)
     }
+
+    config = resolveSearchableColumnWildcards(query, config, queryBuilder)
 
     if (config.searchableColumns) {
         if (query.searchBy && !config.ignoreSearchByInQueryParam) {
